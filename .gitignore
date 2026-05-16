@@ -1,0 +1,17 @@
+venv/
+
+__pycache__/
+
+*.pyc
+
+.env
+
+credentials.json
+
+token.json
+
+audio_output/
+
+*.db
+
+.DS_Store
