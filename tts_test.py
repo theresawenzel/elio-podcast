@@ -1,4 +1,5 @@
 import os
+import subprocess
 from dotenv import load_dotenv
 from elevenlabs.client import ElevenLabs
 
@@ -21,22 +22,29 @@ voice_map = {
     "LAUREN": os.environ["ELEVENLABS_VOICE_LAUREN"],
 }
 
-audio_chunks = []
+pcm_chunks = []
 for i, (speaker, line) in enumerate(script):
     print(f"Generating turn {i+1}/{len(script)}: {speaker}...")
     audio_generator = client.text_to_speech.convert(
         voice_id=voice_map[speaker],
         text=line,
         model_id="eleven_turbo_v2_5",
-        output_format="mp3_44100_128",
+        output_format="pcm_44100",
     )
-    audio_bytes = b"".join(audio_generator)
-    audio_chunks.append(audio_bytes)
+    pcm_chunks.append(b"".join(audio_generator))
 
-final_audio = b"".join(audio_chunks)
+pcm_bytes = b"".join(pcm_chunks)
 
-output_path = "audio_output/test_episode.mp3"
-with open(output_path, "wb") as f:
-    f.write(final_audio)
+output_path = "audio_output/test_episode.ogg"
+subprocess.run(
+    [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "s16le", "-ar", "44100", "-ac", "1", "-i", "pipe:0",
+        "-c:a", "libopus", "-b:a", "64k", "-application", "voip",
+        output_path,
+    ],
+    input=pcm_bytes,
+    check=True,
+)
 
-print(f"\n✅ Saved {len(final_audio):,} bytes to {output_path}")
+print(f"\n✅ Saved {os.path.getsize(output_path):,} bytes to {output_path}")
