@@ -15,3 +15,4 @@ audio_output/
 *.db
 
 .DS_Store
+pillar_history.json

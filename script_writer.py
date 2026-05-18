@@ -110,20 +110,44 @@ Write the full episode dialogue now. Remember: open mid-thought, be specific to 
 """
 
 
-def write_episode(topic: str, pillar_description: str) -> str:
+def write_episode(research_result) -> str:
     """
-    Generates a two-host podcast script.
+    Generates a two-host podcast script from research findings.
     
     Args:
-        topic: A specific topic for this episode 
-               (e.g. "How object permanence develops between 9-12 months")
-        pillar_description: The broader pillar this fits under
-               (e.g. the 'description' field from a PILLARS entry)
+        research_result: A search.ResearchResult containing topic_summary, 
+                         findings list, actionable, etc.
     
     Returns:
         The script as a string, formatted as alternating ALEX:/LAUREN: lines.
     """
     age_desc = elio_age_description()
+    
+    # Format the findings as readable bullets for the user prompt
+    findings_text = "\n".join(
+        f"- {f.claim}\n  Source: {f.source_name} ({f.source_type}, {f.recency})"
+        for f in research_result.findings
+    )
+    
+    user = f"""Today's topic angle (headline framing):
+{research_result.topic_summary}
+
+# Research findings to draw from
+
+{findings_text}
+
+# Suggested actionable (incorporate this into the Reframe section)
+
+{research_result.actionable}
+
+# Researcher's notes (use as background, not for direct quoting)
+
+{research_result.notes if research_result.notes else "(none)"}
+
+---
+
+Write the full episode dialogue now. Lead with the headline framing, then deepen with the findings above. Choose at least 3 depth angles. Include the suggested actionable in the back half. Remember: Alex and Lauren should sound like two thoughtful friends — disagreement and surprise keep the middle alive.
+"""
     
     system = SYSTEM_PROMPT.format(
         child_name=ELIO_NAME,
@@ -132,13 +156,6 @@ def write_episode(topic: str, pillar_description: str) -> str:
         lauren_persona=HOSTS["LAUREN"]["persona"],
         target_word_count=TARGET_WORD_COUNT,
         family_context=FAMILY_CONTEXT,
-    )
-    
-    user = USER_PROMPT_TEMPLATE.format(
-        pillar_description=pillar_description,
-        topic=topic,
-        child_name=ELIO_NAME,
-        age_description=age_desc,
     )
     
     message = client.messages.create(
