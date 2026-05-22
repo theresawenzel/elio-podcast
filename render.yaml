@@ -10,7 +10,6 @@ services:
     schedule: "30 11,12 * * *"
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python agent.py"
-    pythonVersion: "3.13"
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
