@@ -1,28 +1,16 @@
 # Render deployment config for the Elio podcast agent.
-# Render reads this file when you deploy via Blueprint.
 # Secrets are NEVER stored here — only declared by name and set in the dashboard.
 
 services:
   - type: cron
     name: elio-podcast
     runtime: python
-    plan: starter   # $7/mo, needed for persistent disk support
-    region: oregon  # Closest to Anthropic/ElevenLabs US endpoints; default works fine
-    
-    # When the cron fires. Render uses UTC.
-    # 7:30am EST = 12:30 UTC (winter, EST = UTC-5)
-    # 7:30am EDT = 11:30 UTC (summer, EDT = UTC-4)
-    # Schedule for BOTH and have agent.py self-gate based on actual NY time.
+    plan: starter
+    region: oregon
     schedule: "30 11,12 * * *"
-    
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python agent.py"
-    
-    # Python version pinning. Match your local 3.13.
-    runtime: python
     pythonVersion: "3.13"
-    
-    # Environment variables — values set in dashboard, not here
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -58,8 +46,6 @@ services:
         sync: false
       - key: HEALTHCHECK_URL
         sync: false
-    
-    # Persistent disk for SQLite database
     disk:
       name: episode-memory
       mountPath: /data
