@@ -295,3 +295,38 @@ def research(
     
     print(f"   ❌ Could not find sufficient research after {MAX_RESEARCH_ATTEMPTS} attempts")
     return None
+
+KEYWORD_EXTRACTION_SYSTEM = """You are extracting topic keywords from a podcast episode for future deduplication.
+
+Return a JSON array of 3-7 short topic keywords (lowercase, underscored, specific). 
+Keywords should be specific enough that they wouldn't accidentally match unrelated future episodes.
+
+Good keywords: "object_permanence", "german_opol_strategy", "night_weaning_11_months", "stranger_anxiety_peak", "code_switching_research"
+Bad keywords: "babies", "language", "sleep" (too generic), "parenting" (too broad)
+
+Return ONLY a JSON array inside <output> tags, like:
+<output>["keyword_one", "keyword_two", "keyword_three"]</output>
+"""
+
+
+def extract_keywords(topic_summary: str, findings_text: str) -> list[str]:
+    """Pulls 3-7 topic keywords from a research result. Used for memory storage."""
+    user_msg = f"Topic: {topic_summary}\n\nFindings:\n{findings_text}\n\nExtract keywords."
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=200,
+        system=KEYWORD_EXTRACTION_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    text = "".join(b.text for b in response.content if hasattr(b, "text"))
+    try:
+        match = re.search(r"<output>\s*(\[.*?\])\s*</output>", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+        # Fallback
+        match = re.search(r"\[.*?\]", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except (ValueError, json.JSONDecodeError):
+        pass
+    return []   # Return empty list rather than crashing — keywords are nice-to-have, not critical

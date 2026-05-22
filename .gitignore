@@ -16,3 +16,4 @@ audio_output/
 
 .DS_Store
 pillar_history.json
+episodes.db

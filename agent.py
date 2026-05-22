@@ -15,8 +15,9 @@ load_dotenv()
 from script_writer import write_episode
 from tts import synthesize
 from delivery import send_episode, send_escalation
-from search import research
-from pillar_history import pick_pillar, record_pillar, recent_pillars
+from search import research, extract_keywords
+from memory import save_episode, recent_topics
+from pillar_history import pick_pillar
 from config import PILLARS, elio_age_description
 
 
@@ -30,12 +31,14 @@ def main():
     print(f"   ({pillar['description'][:100]}...)")
     print()
     
-    # ───── 2. Research the pillar ─────
+# ───── 2. Research the pillar ─────
     print("🔬 Researching...")
-    recent = recent_pillars()  # Will inform "avoid repeating recent topics" prompts later
+    recent_topic_list = recent_topics(days=30)
+    if recent_topic_list:
+        print(f"   Avoiding {len(recent_topic_list)} recent topics from memory")
     result = research(
         pillar=pillar,
-        recent_topics=[],  # Phase 5 will populate this from episode memory
+        recent_topics=recent_topic_list,
         age_description=age_desc,
     )
     
@@ -71,9 +74,24 @@ def main():
     body = f"🎧 Today's episode: {result.topic_summary}"
     send_episode(audio_path, body)
     
-    # ───── 6. Record that this pillar ran ─────
-    record_pillar(pillar["name"])
-    print(f"\n✅ Done! Pillar '{pillar['name']}' recorded for {date.today()}.")
+    # ───── 6. Save the episode to memory ─────
+    print("\n💾 Saving to memory...")
+    findings_text = "\n".join(
+        f"- {f.claim} (Source: {f.source_name})" for f in result.findings
+    )
+    keywords = extract_keywords(result.topic_summary, findings_text)
+    print(f"   Keywords: {keywords}")
+    
+    episode_id = save_episode(
+        pillar=pillar["name"],
+        topic_summary=result.topic_summary,
+        transcript=script,
+        sources=result.findings,
+        keywords=keywords,
+        word_count=len(script.split()),
+    )
+    
+    print(f"\n✅ Done! Episode {episode_id} for {date.today()} ({pillar['name']}).")
 
 
 if __name__ == "__main__":
