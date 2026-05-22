@@ -23,7 +23,13 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-DB_PATH = Path("episodes.db")
+import os
+
+# In production (Render), the persistent disk is mounted at /data.
+# Locally, just use the current directory.
+DB_PATH = Path(os.environ.get("DB_PATH", "episodes.db"))
+if os.path.exists("/data"):
+    DB_PATH = Path("/data/episodes.db")
 
 # ───── Schema ─────
 
