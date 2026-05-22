@@ -38,6 +38,22 @@ This is NOT generic baby advice. The audience is two well-read, technical, worki
 
 When the episode topic involves language development, multilingualism, or anything where this family structure is relevant, reference it specifically — not as generic "multilingual family" framing. When the topic isn't language-related, you don't need to bring this up, but use it as background that informs realistic examples.
 
+# State of Elio today
+
+{state_of_elio}
+
+This is the current ground truth about Elio — his motor skills, eating, sleep, language, daily routine. Use this to ground your examples in Elio's actual life right now, not generic baby benchmarks. If a finding doesn't match where Elio actually is developmentally, acknowledge that nuance.
+
+# Situational context for today
+
+{situational_context}
+
+# Stylistic preferences from the listeners
+
+{agent_notes}
+
+These are durable preferences. Honor them.
+
 # Format
 
 Two hosts in conversational dialogue:
@@ -110,20 +126,24 @@ Write the full episode dialogue now. Remember: open mid-thought, be specific to 
 """
 
 
-def write_episode(research_result) -> str:
+def write_episode(
+    research_result,
+    state_of_elio: str = "",
+    agent_notes: list[str] | None = None,
+    situational_context: str = "",
+) -> str:
     """
-    Generates a two-host podcast script from research findings.
+    Generates a two-host podcast script from research findings + daily context.
     
     Args:
-        research_result: A search.ResearchResult containing topic_summary, 
-                         findings list, actionable, etc.
-    
-    Returns:
-        The script as a string, formatted as alternating ALEX:/LAUREN: lines.
+        research_result: search.ResearchResult with topic_summary, findings, etc.
+        state_of_elio: Current developmental status from the Google Doc.
+        agent_notes: Stylistic preferences from the Google Doc.
+        situational_context: Calendar-derived context (e.g. "Daycare day").
     """
     age_desc = elio_age_description()
+    agent_notes = agent_notes or []
     
-    # Format the findings as readable bullets for the user prompt
     findings_text = "\n".join(
         f"- {f.claim}\n  Source: {f.source_name} ({f.source_type}, {f.recency})"
         for f in research_result.findings
@@ -149,6 +169,9 @@ def write_episode(research_result) -> str:
 Write the full episode dialogue now. Lead with the headline framing, then deepen with the findings above. Choose at least 3 depth angles. Include the suggested actionable in the back half. Remember: Alex and Lauren should sound like two thoughtful friends — disagreement and surprise keep the middle alive.
 """
     
+    # Format the agent notes for the prompt
+    agent_notes_text = "\n".join(f"- {n}" for n in agent_notes) if agent_notes else "(none)"
+    
     system = SYSTEM_PROMPT.format(
         child_name=ELIO_NAME,
         age_description=age_desc,
@@ -156,6 +179,9 @@ Write the full episode dialogue now. Lead with the headline framing, then deepen
         lauren_persona=HOSTS["LAUREN"]["persona"],
         target_word_count=TARGET_WORD_COUNT,
         family_context=FAMILY_CONTEXT,
+        state_of_elio=state_of_elio if state_of_elio else "(Not provided today — use family context as background.)",
+        situational_context=situational_context if situational_context else "(No specific events scheduled today.)",
+        agent_notes=agent_notes_text,
     )
     
     message = client.messages.create(
