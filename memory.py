@@ -1,64 +1,60 @@
 """
-SQLite-backed memory for the Elio podcast agent.
+Episode memory layer.
 
-Stores:
-- episodes: one row per delivered episode
-- topic_keywords: extracted keywords per episode (for fast "have we covered X" lookups)
-- sources: source attribution per episode (for analytics / spotting source patterns)
+- Locally: SQLite (no setup, file in repo root).
+- On Render: Postgres (via DATABASE_URL env var).
 
-Replaces pillar_history.py from Phase 4 — that JSON file becomes deprecated
-but stays around for one migration cycle (we'll delete it in Step 4).
-
-Design notes:
-- All public functions accept an optional `db_path` for testability.
-- All writes are atomic (single transaction, commit on success).
-- All datetime values stored as ISO strings for portability.
-- Schema migrations handled by IF NOT EXISTS on table creation.
+Single API — callers don't care which backend.
 """
 
-import json
-import sqlite3
+import os
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import os
+# Pick backend based on DATABASE_URL env var
+USE_POSTGRES = bool(os.environ.get("DATABASE_URL"))
 
-# In production (Render), the persistent disk is mounted at /data.
-# Locally, just use the current directory.
-DB_PATH = Path(os.environ.get("DB_PATH", "episodes.db"))
-if os.path.exists("/data"):
-    DB_PATH = Path("/data/episodes.db")
+if USE_POSTGRES:
+    import psycopg2
+    import psycopg2.extras
+    DATABASE_URL = os.environ["DATABASE_URL"]
+else:
+    import sqlite3
+    DB_PATH = Path(os.environ.get("DB_PATH", "episodes.db"))
+
 
 # ───── Schema ─────
+# Postgres uses SERIAL; SQLite uses INTEGER PRIMARY KEY AUTOINCREMENT.
+# We swap the relevant tokens at build time.
 
-SCHEMA = """
+SCHEMA_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS episodes (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    date         TEXT NOT NULL,                    -- YYYY-MM-DD
-    pillar       TEXT NOT NULL,
+    id            {AUTO_PK},
+    date          TEXT NOT NULL,
+    pillar        TEXT NOT NULL,
     topic_summary TEXT NOT NULL,
-    transcript   TEXT,                              -- full ALEX:/LAUREN: script
-    audio_url    TEXT,                              -- R2 public URL
-    word_count   INTEGER,
-    created_at   TEXT NOT NULL                      -- ISO datetime
+    transcript    TEXT,
+    audio_url     TEXT,
+    word_count    INTEGER,
+    created_at    TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_episodes_date ON episodes(date);
 CREATE INDEX IF NOT EXISTS idx_episodes_pillar ON episodes(pillar);
 
 CREATE TABLE IF NOT EXISTS topic_keywords (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    episode_id  INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
-    keyword     TEXT NOT NULL
+    id         {AUTO_PK},
+    episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    keyword    TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_topic_keywords_keyword ON topic_keywords(keyword);
 CREATE INDEX IF NOT EXISTS idx_topic_keywords_episode ON topic_keywords(episode_id);
 
 CREATE TABLE IF NOT EXISTS sources (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          {AUTO_PK},
     episode_id  INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
     claim       TEXT,
     source_name TEXT,
@@ -70,29 +66,68 @@ CREATE TABLE IF NOT EXISTS sources (
 CREATE INDEX IF NOT EXISTS idx_sources_episode ON sources(episode_id);
 """
 
+if USE_POSTGRES:
+    SCHEMA = SCHEMA_TEMPLATE.format(AUTO_PK="SERIAL PRIMARY KEY")
+else:
+    SCHEMA = SCHEMA_TEMPLATE.format(AUTO_PK="INTEGER PRIMARY KEY AUTOINCREMENT")
 
-# ───── Connection helper ─────
+
+# ───── Connection ─────
 
 @contextmanager
-def _connect(db_path: Path = DB_PATH):
-    """Context-managed SQLite connection with foreign keys + row factory."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    try:
-        yield conn
-    finally:
-        conn.close()
+def _connect():
+    """Backend-agnostic connection context manager."""
+    if USE_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.cursor_factory = psycopg2.extras.RealDictCursor
+        try:
+            yield conn
+        finally:
+            conn.close()
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield conn
+        finally:
+            conn.close()
 
 
-def init_db(db_path: Path = DB_PATH) -> None:
-    """Idempotently creates tables and indexes."""
-    with _connect(db_path) as conn:
-        conn.executescript(SCHEMA)
+def _placeholder():
+    """Returns SQL parameter placeholder for the active backend."""
+    return "%s" if USE_POSTGRES else "?"
+
+
+def init_db():
+    """Idempotently create tables and indexes."""
+    with _connect() as conn:
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute(SCHEMA)
+        else:
+            cur.executescript(SCHEMA)
         conn.commit()
 
 
-# ───── Public API: write ─────
+# ───── Helpers for backend differences ─────
+
+def _row_to_dict(row):
+    """Convert a row to dict (works for both backends)."""
+    if row is None:
+        return None
+    return dict(row)
+
+
+def _last_insert_id(cur, table: str = "episodes") -> int:
+    """Returns the autogenerated id from the most recent insert."""
+    if USE_POSTGRES:
+        cur.execute("SELECT LASTVAL()")
+        return cur.fetchone()["lastval"]
+    return cur.lastrowid
+
+
+# ───── Public API ─────
 
 def save_episode(
     pillar: str,
@@ -103,29 +138,20 @@ def save_episode(
     keywords: list[str] | None = None,
     word_count: int = 0,
     on_date: date | None = None,
-    db_path: Path = DB_PATH,
 ) -> int:
-    """
-    Saves a fully-delivered episode plus its sources and keywords.
-    
-    Args:
-        sources: list of search.Finding objects (or dicts with same shape)
-        keywords: list of strings — short topic markers like "separation_anxiety", 
-                  "object_permanence", "code_switching"
-    
-    Returns: the new episode's row id.
-    """
-    init_db(db_path)
+    """Saves an episode plus its sources and keywords. Returns the new id."""
+    init_db()
     on_date = on_date or date.today()
     sources = sources or []
     keywords = keywords or []
+    p = _placeholder()
     
-    with _connect(db_path) as conn:
+    with _connect() as conn:
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO episodes
-               (date, pillar, topic_summary, transcript, audio_url, word_count, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            f"""INSERT INTO episodes
+                (date, pillar, topic_summary, transcript, audio_url, word_count, created_at)
+                VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})""",
             (
                 on_date.isoformat(),
                 pillar,
@@ -136,20 +162,20 @@ def save_episode(
                 datetime.now().isoformat(),
             ),
         )
-        episode_id = cur.lastrowid
+        episode_id = _last_insert_id(cur)
         
         for kw in keywords:
             cur.execute(
-                "INSERT INTO topic_keywords (episode_id, keyword) VALUES (?, ?)",
+                f"INSERT INTO topic_keywords (episode_id, keyword) VALUES ({p}, {p})",
                 (episode_id, kw.strip().lower()),
             )
         
         for src in sources:
             data = asdict(src) if is_dataclass(src) else dict(src)
             cur.execute(
-                """INSERT INTO sources 
-                   (episode_id, claim, source_name, source_url, source_type, recency)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                f"""INSERT INTO sources
+                    (episode_id, claim, source_name, source_url, source_type, recency)
+                    VALUES ({p}, {p}, {p}, {p}, {p}, {p})""",
                 (
                     episode_id,
                     data.get("claim", ""),
@@ -164,72 +190,74 @@ def save_episode(
         return episode_id
 
 
-# ───── Public API: read ─────
-
-def recent_episodes(days: int = 30, db_path: Path = DB_PATH) -> list[dict]:
-    """Returns episodes from the last N days, newest first."""
-    init_db(db_path)
+def recent_episodes(days: int = 30) -> list[dict]:
+    init_db()
     cutoff = (date.today() - timedelta(days=days)).isoformat()
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM episodes WHERE date >= ? ORDER BY date DESC, id DESC",
+    p = _placeholder()
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT * FROM episodes WHERE date >= {p} ORDER BY date DESC, id DESC",
             (cutoff,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [_row_to_dict(r) for r in cur.fetchall()]
 
 
-def recent_topics(days: int = 30, db_path: Path = DB_PATH) -> list[str]:
-    """Returns topic_summary strings from the last N days, newest first.
-    
-    This is what the research module calls to know what to avoid repeating.
-    """
-    return [e["topic_summary"] for e in recent_episodes(days, db_path)]
+def recent_topics(days: int = 30) -> list[str]:
+    return [e["topic_summary"] for e in recent_episodes(days)]
 
 
-def recent_keywords(days: int = 30, db_path: Path = DB_PATH) -> list[str]:
-    """Returns distinct keywords used in the last N days."""
-    init_db(db_path)
+def recent_keywords(days: int = 30) -> list[str]:
+    init_db()
     cutoff = (date.today() - timedelta(days=days)).isoformat()
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            """SELECT DISTINCT k.keyword 
-               FROM topic_keywords k
-               JOIN episodes e ON e.id = k.episode_id
-               WHERE e.date >= ?
-               ORDER BY k.keyword""",
+    p = _placeholder()
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""SELECT DISTINCT k.keyword 
+                FROM topic_keywords k
+                JOIN episodes e ON e.id = k.episode_id
+                WHERE e.date >= {p}
+                ORDER BY k.keyword""",
             (cutoff,),
-        ).fetchall()
-        return [r["keyword"] for r in rows]
+        )
+        return [r["keyword"] for r in cur.fetchall()]
 
 
-def pillar_last_used(pillar_name: str, db_path: Path = DB_PATH) -> date | None:
-    """Returns the date a pillar was last used, or None if never."""
-    init_db(db_path)
-    with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT date FROM episodes WHERE pillar = ? ORDER BY date DESC LIMIT 1",
+def pillar_last_used(pillar_name: str) -> date | None:
+    init_db()
+    p = _placeholder()
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT date FROM episodes WHERE pillar = {p} ORDER BY date DESC LIMIT 1",
             (pillar_name,),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         return date.fromisoformat(row["date"]) if row else None
 
 
-def pillars_used_recently(days: int = 7, db_path: Path = DB_PATH) -> list[str]:
-    """Returns distinct pillar names used in the last N days.
-    
-    This is what pillar rotation will call after Step 4.
-    """
-    init_db(db_path)
+def pillars_used_recently(days: int = 7) -> list[str]:
+    init_db()
     cutoff = (date.today() - timedelta(days=days)).isoformat()
-    with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT pillar FROM episodes WHERE date >= ?",
+    p = _placeholder()
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT DISTINCT pillar FROM episodes WHERE date >= {p}",
             (cutoff,),
-        ).fetchall()
-        return [r["pillar"] for r in rows]
+        )
+        return [r["pillar"] for r in cur.fetchall()]
 
 
-def episode_count(db_path: Path = DB_PATH) -> int:
-    """Total episodes ever recorded — useful for show_memory CLI."""
-    init_db(db_path)
-    with _connect(db_path) as conn:
-        return conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+def episode_count() -> int:
+    init_db()
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS count FROM episodes")
+        row = cur.fetchone()
+        return row["count"] if USE_POSTGRES else row[0]
+
+
+# Backward-compat alias used by show_memory.py
+DB_PATH_DISPLAY = "Postgres" if USE_POSTGRES else str(DB_PATH if not USE_POSTGRES else "")

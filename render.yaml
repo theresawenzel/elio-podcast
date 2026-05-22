@@ -1,5 +1,5 @@
 # Render deployment config for the Elio podcast agent.
-# Secrets are NEVER stored here — only declared by name and set in the dashboard.
+# Cron job + managed Postgres database.
 
 services:
   - type: cron
@@ -11,6 +11,10 @@ services:
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python agent.py"
     envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: elio-podcast-db
+          property: connectionString
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: ELEVENLABS_API_KEY
@@ -45,7 +49,8 @@ services:
         sync: false
       - key: HEALTHCHECK_URL
         sync: false
-    disk:
-      name: episode-memory
-      mountPath: /data
-      sizeGB: 1
+
+databases:
+  - name: elio-podcast-db
+    plan: free
+    region: oregon
